@@ -1,0 +1,49 @@
+diff --git a/src/daemon/daemon.c b/src/daemon/daemon.c
+index 00c6f96..10ea635 100644
+--- a/src/daemon/daemon.c
++++ b/src/daemon/daemon.c
+@@ -27,6 +27,7 @@
+ #include <errno.h>
+ #include <string.h>
+ #include <stdio.h>
++#include <time.h>
+
+ #include <glib/gi18n.h>
+ #include <glib.h>
+@@ -1105,6 +1106,7 @@ static void url_clicked_cb(GtkWindow* nw, const char *url)
+
+ static gboolean screensaver_active(GtkWidget* nw)
+ {
++  return FALSE;
+ 	GError* error = NULL;
+ 	gboolean active = FALSE;
+ 	GVariant *variant;
+@@ -1303,6 +1305,20 @@ GQuark notify_daemon_error_quark(void)
+ 	return q;
+ }
+
++static void log_notif(const char* summary, const char *body) {
++  FILE *f = fopen("/home/kevin/.mate-notifications-log", "a");
++  if (f == NULL) {
++    return;
++  }
++  time_t rawtime;
++  struct tm* timeinfo;
++  time(&rawtime);
++  timeinfo = localtime(&rawtime);
++  fprintf(f, "[%02d/%02d/%04d %02d:%02d:%02d]\n%s\n%s\n\n", timeinfo->tm_mon + 1, timeinfo->tm_mday, timeinfo->tm_year + 1900, timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec,
++      summary, body);
++  fclose(f);
++}
++
+ static gboolean notify_daemon_notify_handler(NotifyDaemonNotifications *object, GDBusMethodInvocation *invocation, const gchar *app_name, guint id, const gchar *icon, const gchar *summary, const gchar *body, const gchar *const *actions, GVariant *hints, gint timeout, gpointer user_data)
+ {
+ 	NotifyDaemon *daemon;
+@@ -1376,6 +1392,7 @@ static gboolean notify_daemon_notify_handler(NotifyDaemonNotifications *object,
+
+ 	theme_set_notification_text (nw, summary, body);
+ 	theme_set_notification_hints (nw, hints);
++  log_notif(summary, body);
+
+ 	/*
+ 	 *XXX This needs to handle file URIs and all that.

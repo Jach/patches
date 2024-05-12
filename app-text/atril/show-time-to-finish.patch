@@ -1,0 +1,67 @@
+diff --git a/libmisc/ev-page-action-widget.c b/libmisc/ev-page-action-widget.c
+index c24d9b97..5b9343fd 100644
+--- a/libmisc/ev-page-action-widget.c
++++ b/libmisc/ev-page-action-widget.c
+@@ -61,7 +61,11 @@ update_pages_label (EvPageActionWidget *action_widget,
+
+ 	n_pages = ev_document_get_n_pages (action_widget->document);
+ 	if (ev_document_has_text_page_labels (action_widget->document)) {
+-		label_text = g_strdup_printf (_("(%d of %d)"), page + 1, n_pages);
++    if (ev_view_secs_left > 0) {
++      label_text = g_strdup_printf (_("(%d of %d) %dm %ds"), page + 1, n_pages, ((long int)ev_view_secs_left)/60, ((long int)ev_view_secs_left)%60);
++    } else {
++      label_text = g_strdup_printf (_("(%d of %d)"), page + 1, n_pages);
++    }
+ 	} else {
+ 		label_text = g_strdup_printf (_("of %d"), n_pages);
+ 	}
+diff --git a/libview/ev-view.c b/libview/ev-view.c
+index 86c83944..94427187 100644
+--- a/libview/ev-view.c
++++ b/libview/ev-view.c
+@@ -46,6 +46,8 @@
+ #include "ev-view-private.h"
+ #include "ev-view-type-builtins.h"
+
++double ev_view_secs_left = -1.0;
++
+ enum {
+ 	SIGNAL_SCROLL,
+ 	SIGNAL_HANDLE_LINK,
+@@ -6740,6 +6742,15 @@ ev_view_autoscroll_cb (EvView *view)
+ 		       gtk_adjustment_get_page_size (view->vadjustment));
+ 	gtk_adjustment_set_value (view->vadjustment, value);
+
++  double w, h;
++  ev_document_get_page_size(view->document, 0, &w, &h);
++  gint pages = ev_document_get_n_pages(view->document);
++
++  double end_of_doc_vadj = h * (pages-1) * view->scale;
++  double vadj_left = end_of_doc_vadj - value;
++  // speed is vadj per 20 millis (see autoscroll_start's timeout add call) so to get time...
++  ev_view_secs_left = ((20.0 / speed) * vadj_left) / 1000.0;
++
+ 	return TRUE;
+
+ }
+@@ -6767,6 +6778,7 @@ void
+ ev_view_autoscroll_stop (EvView *view)
+ {
+ 	gint x, y;
++  ev_view_secs_left = -1.0;
+
+ 	g_return_if_fail (EV_IS_VIEW (view));
+
+diff --git a/libview/ev-view.h b/libview/ev-view.h
+index ac16211f..245eb1be 100644
+--- a/libview/ev-view.h
++++ b/libview/ev-view.h
+@@ -24,6 +24,8 @@
+ #ifndef __EV_VIEW_H__
+ #define __EV_VIEW_H__
+
++extern double ev_view_secs_left;
++
+ #include <gtk/gtk.h>
+
+ #include <atril-document.h>

@@ -1,0 +1,14 @@
+diff -Naru a/hacks/fireworkx.c b/hacks/fireworkx.c
+--- a/hacks/fireworkx.c	2021-01-25 07:59:17.924635696 -0800
++++ b/hacks/fireworkx.c	2022-07-24 00:54:17.683289705 -0700
+@@ -147,7 +147,9 @@
+ 			f = sqrt((fs->cx - x) * (fs->cx - x) + (fs->cy - y) * (fs->cy - y)) + 4.0;
+ 			f = FLASH_ZOOM / f;
+ 			f += pow(f,0.1) * frand(0.0001); /* dither */
+-			st->light_map[v] = f;
++      if (!(x == 0 && y == 0)) {
++        st->light_map[v] = f;
++      }
+ 		}
+ 	}
+ }
