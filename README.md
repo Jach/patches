@@ -10,6 +10,9 @@ Some notes follow on what the patches do and what version they have most recentl
 * *atril* - 1.26.0-r5 - When auto-scrolling a PDF, I wanted atril (aka evince)
   to show me an estimate time of how long it will take to reach the end of the
   document. This hack does that.
+  * Now on v1.28.4, I let the AI modify the patch further so it updates the
+    estimated time instantly while scrolling instead of only at page boundaries,
+    and shows nothing when auto-scrolling up.
 * *mate-system-monitor* - 1.26.2 - I believe this is a patch that landed in
   1.28, but basically the mate system monitor broke at some point and was no
   longer showing and saving selected fields like Memory, this fixes that. Will
@@ -32,3 +35,17 @@ Some notes follow on what the patches do and what version they have most recentl
   windows forever! Anyway, I got this patch from somewhere, presumably it
   prevents screen tearing on nvidia cards. I'm not sure if it really does
   anything, though I don't notice screen tearing (much?) so maybe...
+* *caja* - 1.28.0 - This is the AI's attempt to put thumbnail loading off the
+  main thread and thus not leave that as a cause of bogging down a directory
+  listing with lots of images in it.
+* *gdk-pixbuf* - 2.44.8 - AI's fix of an N^2 issue with reading certain large image
+  files (like an animated gif), so reading such files is no longer super slow.
+* *shared-mime-info* - 2.4 - Again thanks to AI, `gio list -a standard::content-type` will be fast
+  based on a file name if there's one file type associated with a file
+  extension, otherwise it opens the file to sniff its actual type. In the case
+  of pngs, a .png is actually ambiguous, listed as either a png or an animated
+  png. Removing apng from the consideration makes a .png file no longer require
+  opening to sniff whether it's a normal png or apng, it just assumes it's a
+  normal png. In a directory with thousands of pngs, this change resulted in a
+  huge speedup (over 14 minutes vs a couple seconds) and impacts things like
+  firefox's save-as native file location dialog.

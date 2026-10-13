@@ -1,67 +1,168 @@
 diff --git a/libmisc/ev-page-action-widget.c b/libmisc/ev-page-action-widget.c
-index c24d9b97..5b9343fd 100644
+index 6b5d476..44521e4 100644
 --- a/libmisc/ev-page-action-widget.c
 +++ b/libmisc/ev-page-action-widget.c
-@@ -61,7 +61,11 @@ update_pages_label (EvPageActionWidget *action_widget,
-
+@@ -46,8 +46,14 @@ struct _EvPageActionWidget
+ 	gulong signal_id;
+ 	GtkTreeModel *filter_model;
+ 	GtkTreeModel *model;
++
++	guint time_left_refresh_id;
++	gboolean showing_time_left;
+ };
+ 
++/* How often the autoscroll time-to-end in the label is refreshed */
++#define TIME_LEFT_REFRESH_MS 250
++
+ static guint widget_signals[WIDGET_N_SIGNALS] = {0, };
+ 
+ G_DEFINE_TYPE (EvPageActionWidget, ev_page_action_widget, GTK_TYPE_TOOL_ITEM)
+@@ -58,10 +64,27 @@ update_pages_label (EvPageActionWidget *action_widget,
+ {
+ 	char *label_text;
+ 	gint n_pages;
++	gint secs_left = 0;
++
++	if (action_widget->doc_model)
++		secs_left = GPOINTER_TO_INT (g_object_get_data (G_OBJECT (action_widget->doc_model),
++								EV_VIEW_AUTOSCROLL_SECS_LEFT_KEY));
++	action_widget->showing_time_left = FALSE;
+ 
  	n_pages = ev_document_get_n_pages (action_widget->document);
  	if (ev_document_has_text_page_labels (action_widget->document)) {
 -		label_text = g_strdup_printf (_("(%d of %d)"), page + 1, n_pages);
-+    if (ev_view_secs_left > 0) {
-+      label_text = g_strdup_printf (_("(%d of %d) %dm %ds"), page + 1, n_pages, ((long int)ev_view_secs_left)/60, ((long int)ev_view_secs_left)%60);
-+    } else {
-+      label_text = g_strdup_printf (_("(%d of %d)"), page + 1, n_pages);
-+    }
++		if (secs_left > 0) {
++			gboolean hours = (secs_left / 60) / 60 > 1;
++			gint big_left = hours ? (secs_left / 60) / 60 : secs_left / 60;
++			gint small_left = hours ? (secs_left / 60) % 60 : secs_left % 60;
++
++			label_text = g_strdup_printf (_("(%d of %d) %d%s %d%s"), page + 1, n_pages,
++						      big_left, hours ? "h" : "m",
++						      small_left, hours ? "m" : "s");
++			action_widget->showing_time_left = TRUE;
++		} else {
++			label_text = g_strdup_printf (_("(%d of %d)"), page + 1, n_pages);
++		}
  	} else {
  		label_text = g_strdup_printf (_("of %d"), n_pages);
  	}
+@@ -101,6 +124,24 @@ page_changed_cb (EvDocumentModel    *model,
+ 	ev_page_action_widget_set_current_page (action_widget, new_page);
+ }
+ 
++static gboolean
++time_left_refresh_cb (EvPageActionWidget *action_widget)
++{
++	gpointer secs_left;
++
++	if (!action_widget->document || !action_widget->doc_model)
++		return G_SOURCE_CONTINUE;
++
++	secs_left = g_object_get_data (G_OBJECT (action_widget->doc_model),
++				       EV_VIEW_AUTOSCROLL_SECS_LEFT_KEY);
++	/* Also refresh once after autoscroll stops, to clear the time */
++	if (secs_left || action_widget->showing_time_left)
++		update_pages_label (action_widget,
++				    ev_document_model_get_page (action_widget->doc_model));
++
++	return G_SOURCE_CONTINUE;
++}
++
+ static gboolean
+ page_scroll_cb (EvPageActionWidget *action_widget, GdkEventScroll *event)
+ {
+@@ -188,6 +229,10 @@ ev_page_action_widget_init (EvPageActionWidget *action_widget)
+ 	gtk_widget_show (hbox);
+ 
+ 	gtk_widget_show (GTK_WIDGET (action_widget));
++
++	action_widget->time_left_refresh_id =
++		g_timeout_add (TIME_LEFT_REFRESH_MS, (GSourceFunc)time_left_refresh_cb,
++			       action_widget);
+ }
+ 
+ static void
+@@ -239,6 +284,19 @@ ev_page_action_widget_set_model (EvPageActionWidget *action_widget,
+ 			  action_widget);
+ }
+ 
++static void
++ev_page_action_widget_dispose (GObject *object)
++{
++	EvPageActionWidget *action_widget = EV_PAGE_ACTION_WIDGET (object);
++
++	if (action_widget->time_left_refresh_id > 0) {
++		g_source_remove (action_widget->time_left_refresh_id);
++		action_widget->time_left_refresh_id = 0;
++	}
++
++	G_OBJECT_CLASS (ev_page_action_widget_parent_class)->dispose (object);
++}
++
+ static void
+ ev_page_action_widget_finalize (GObject *object)
+ {
+@@ -278,6 +336,7 @@ ev_page_action_widget_class_init (EvPageActionWidgetClass *class)
+ {
+ 	GObjectClass *object_class = G_OBJECT_CLASS (class);
+ 
++	object_class->dispose = ev_page_action_widget_dispose;
+ 	object_class->finalize = ev_page_action_widget_finalize;
+ 
+ 	widget_signals[WIDGET_ACTIVATE_LINK] =
 diff --git a/libview/ev-view.c b/libview/ev-view.c
-index 86c83944..94427187 100644
+index 5301079..5f30008 100644
 --- a/libview/ev-view.c
 +++ b/libview/ev-view.c
-@@ -46,6 +46,8 @@
- #include "ev-view-private.h"
- #include "ev-view-type-builtins.h"
-
-+double ev_view_secs_left = -1.0;
-+
- enum {
- 	SIGNAL_SCROLL,
- 	SIGNAL_HANDLE_LINK,
-@@ -6740,6 +6742,15 @@ ev_view_autoscroll_cb (EvView *view)
+@@ -6765,6 +6765,26 @@ ev_view_autoscroll_cb (EvView *view)
  		       gtk_adjustment_get_page_size (view->vadjustment));
  	gtk_adjustment_set_value (view->vadjustment, value);
-
-+  double w, h;
-+  ev_document_get_page_size(view->document, 0, &w, &h);
-+  gint pages = ev_document_get_n_pages(view->document);
+ 
++	/* Publish the estimated time to reach the end of the document on the
++	 * model, where the page action widget polls it for its label. */
++	if (speed > 0) {
++		gdouble w, h, end_of_doc_vadj, vadj_left, secs_left;
++		gint pages;
 +
-+  double end_of_doc_vadj = h * (pages-1) * view->scale;
-+  double vadj_left = end_of_doc_vadj - value;
-+  // speed is vadj per 20 millis (see autoscroll_start's timeout add call) so to get time...
-+  ev_view_secs_left = ((20.0 / speed) * vadj_left) / 1000.0;
++		ev_document_get_page_size (view->document, 0, &w, &h);
++		pages = ev_document_get_n_pages (view->document);
++
++		end_of_doc_vadj = h * (pages - 1) * view->scale;
++		vadj_left = end_of_doc_vadj - value;
++		/* speed is vadj per 20 millis (see autoscroll_start's timeout add call) so to get time... */
++		secs_left = ((20.0 / speed) * vadj_left) / 1000.0;
++
++		g_object_set_data (G_OBJECT (view->model), EV_VIEW_AUTOSCROLL_SECS_LEFT_KEY,
++				   GINT_TO_POINTER ((gint) CLAMP (secs_left, 0, G_MAXINT)));
++	} else {
++		g_object_set_data (G_OBJECT (view->model), EV_VIEW_AUTOSCROLL_SECS_LEFT_KEY, NULL);
++	}
 +
  	return TRUE;
-
+ 
  }
-@@ -6767,6 +6778,7 @@ void
- ev_view_autoscroll_stop (EvView *view)
- {
- 	gint x, y;
-+  ev_view_secs_left = -1.0;
-
+@@ -6795,6 +6815,9 @@ ev_view_autoscroll_stop (EvView *view)
+ 
  	g_return_if_fail (EV_IS_VIEW (view));
-
+ 
++	if (view->model)
++		g_object_set_data (G_OBJECT (view->model), EV_VIEW_AUTOSCROLL_SECS_LEFT_KEY, NULL);
++
+ 	if (!view->scroll_info.autoscrolling)
+ 		return;
+ 
 diff --git a/libview/ev-view.h b/libview/ev-view.h
-index ac16211f..245eb1be 100644
+index ce455a5..40639f3 100644
 --- a/libview/ev-view.h
 +++ b/libview/ev-view.h
-@@ -24,6 +24,8 @@
- #ifndef __EV_VIEW_H__
- #define __EV_VIEW_H__
-
-+extern double ev_view_secs_left;
+@@ -37,6 +37,10 @@ G_BEGIN_DECLS
+ #define EV_VIEW(obj)            (G_TYPE_CHECK_INSTANCE_CAST ((obj), EV_TYPE_VIEW, EvView))
+ #define EV_IS_VIEW(obj)         (G_TYPE_CHECK_INSTANCE_TYPE ((obj), EV_TYPE_VIEW))
+ 
++/* Object data key on the EvDocumentModel holding the autoscroll
++ * time-to-end estimate in seconds (GINT_TO_POINTER), NULL when unknown. */
++#define EV_VIEW_AUTOSCROLL_SECS_LEFT_KEY "ev-view-autoscroll-secs-left"
 +
- #include <gtk/gtk.h>
-
- #include <atril-document.h>
+ typedef struct _EvView       EvView;
+ typedef struct _EvViewClass  EvViewClass;
+ 

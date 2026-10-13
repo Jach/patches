@@ -1,0 +1,11 @@
+diff --git a/data/freedesktop.org.xml.in b/data/freedesktop.org.xml.in
+--- a/data/freedesktop.org.xml.in
++++ b/data/freedesktop.org.xml.in
+@@ -5530,7 +5530,6 @@ command to generate the output files.
+       </match>
+     </magic>
+     <glob pattern="*.apng"/>
+-    <glob pattern="*.png" weight="40"/>
+     <alias type="image/vnd.mozilla.apng"/>
+   </mime-type>
+   <mime-type type="image/rle">

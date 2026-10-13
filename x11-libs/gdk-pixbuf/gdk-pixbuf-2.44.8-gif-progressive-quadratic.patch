@@ -1,0 +1,41 @@
+diff --git a/gdk-pixbuf/io-gif.c b/gdk-pixbuf/io-gif.c
+index 7f6f82b..bda0236 100644
+--- a/gdk-pixbuf/io-gif.c
++++ b/gdk-pixbuf/io-gif.c
+@@ -127,6 +127,7 @@ struct _GifContext
+ 	GdkPixbufModuleUpdatedFunc updated_func;
+ 	gpointer user_data;
+ 	GByteArray *buf;
++	gsize buf_pos; /* bytes of buf already consumed by gif_read() */
+ 
+ 	/* extension context */
+ 	guchar extension_label;
+@@ -163,9 +164,9 @@ gif_read (GifContext *context, guchar *buffer, size_t len)
+ 
+ 		return retval;
+ 	} else {
+-		if (context->buf->len >= len) {
+-			memcpy (buffer, context->buf->data, len);
+-			g_byte_array_remove_range (context->buf, 0, len);
++		if (context->buf->len - context->buf_pos >= len) {
++			memcpy (buffer, context->buf->data + context->buf_pos, len);
++			context->buf_pos += len;
+ 			return TRUE;
+ 		}
+ 	}
+@@ -952,6 +953,15 @@ gdk_pixbuf__gif_image_load_increment (gpointer data,
+ 	g_byte_array_append (context->buf, buf, size);
+ 
+ 	retval = gif_main_loop (context);
++
++	/* Drop the consumed bytes once per write.  Removing them on every
++	 * gif_read() moved the whole unread remainder each time, which made
++	 * a single large write quadratic in the file size. */
++	if (context->buf_pos > 0) {
++		g_byte_array_remove_range (context->buf, 0, context->buf_pos);
++		context->buf_pos = 0;
++	}
++
+ 	if (retval == -2)
+ 		return FALSE;
+ 

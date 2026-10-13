@@ -1,0 +1,265 @@
+diff --git a/libcaja-private/caja-directory-async.c b/libcaja-private/caja-directory-async.c
+index 84e17d4..5bb98d5 100644
+--- a/libcaja-private/caja-directory-async.c
++++ b/libcaja-private/caja-directory-async.c
+@@ -81,7 +81,6 @@ struct ThumbnailState
+     CajaDirectory *directory;
+     GCancellable *cancellable;
+     CajaFile *file;
+-    gboolean trying_original;
+     gboolean tried_original;
+ };
+ 
+@@ -4203,6 +4202,23 @@ thumbnail_state_free (ThumbnailState *state)
+ 
+ extern int cached_thumbnail_size;
+ 
++/* Inputs for the worker thread.  The thread must not touch CajaFile or
++ * CajaDirectory, so everything it needs is copied here up front. */
++typedef struct
++{
++    GFile *original;    /* NULL unless the original image is wanted */
++    GFile *thumbnail;   /* NULL if there is no thumbnail file */
++    int max_size;
++} ThumbnailLoad;
++
++static void
++thumbnail_load_free (ThumbnailLoad *load)
++{
++    g_clear_object (&load->original);
++    g_clear_object (&load->thumbnail);
++    g_free (load);
++}
++
+ /* scale very large images down to the max. size we need */
+ static void
+ thumbnail_loader_size_prepared (GdkPixbufLoader *loader,
+@@ -4215,8 +4231,7 @@ thumbnail_loader_size_prepared (GdkPixbufLoader *loader,
+ 
+     aspect_ratio = ((double) width) / height;
+ 
+-    /* cf. caja_file_get_icon() */
+-    max_thumbnail_size = CAJA_ICON_SIZE_LARGEST * cached_thumbnail_size / CAJA_ICON_SIZE_STANDARD;
++    max_thumbnail_size = GPOINTER_TO_INT (user_data);
+     if (MAX (width, height) > max_thumbnail_size)
+     {
+         if (width > height)
+@@ -4234,35 +4249,53 @@ thumbnail_loader_size_prepared (GdkPixbufLoader *loader,
+     }
+ }
+ 
++/* Runs in a worker thread. */
+ static GdkPixbuf *
+-get_pixbuf_for_content (goffset file_len,
+-                        char *file_contents)
++get_pixbuf_for_location (GFile *location,
++                         int max_size,
++                         GCancellable *cancellable)
+ {
+-    gboolean res;
++    GFileInputStream *stream;
+     GdkPixbuf *pixbuf, *pixbuf2;
+     GdkPixbufLoader *loader;
+-    gsize chunk_len;
+-    pixbuf = NULL;
++    guchar *buffer;
++    gssize n_read;
++    gboolean res;
++
++    stream = g_file_read (location, cancellable, NULL);
++    if (stream == NULL)
++    {
++        return NULL;
++    }
+ 
++    pixbuf = NULL;
+     loader = gdk_pixbuf_loader_new ();
+     g_signal_connect (loader, "size-prepared",
+                       G_CALLBACK (thumbnail_loader_size_prepared),
+-                      NULL);
++                      GINT_TO_POINTER (max_size));
+ 
+-    /* For some reason we have to write in chunks, or gdk-pixbuf fails */
++    /* Stream in modest chunks: some loaders get very slow when handed a
++     * large file in a single write, and this avoids holding the whole
++     * file in memory. */
++    buffer = g_malloc (64 * 1024);
+     res = TRUE;
+-    while (res && file_len > 0)
+-    {
+-        chunk_len = file_len;
+-        res = gdk_pixbuf_loader_write (loader, (guchar *) file_contents, chunk_len, NULL);
+-        file_contents += chunk_len;
+-        file_len -= chunk_len;
+-    }
+-    if (res)
++    while (res)
+     {
+-        res = gdk_pixbuf_loader_close (loader, NULL);
++        n_read = g_input_stream_read (G_INPUT_STREAM (stream), buffer,
++                                      64 * 1024, cancellable, NULL);
++        if (n_read <= 0)
++        {
++            res = (n_read == 0);
++            break;
++        }
++        res = gdk_pixbuf_loader_write (loader, buffer, n_read, NULL);
+     }
+-    if (res)
++    g_free (buffer);
++    g_object_unref (stream);
++
++    /* Always close, even on failure, so the loader is finalized cleanly. */
++    res = gdk_pixbuf_loader_close (loader, NULL) && res;
++    if (res && gdk_pixbuf_loader_get_pixbuf (loader) != NULL)
+     {
+         pixbuf = g_object_ref (gdk_pixbuf_loader_get_pixbuf (loader));
+     }
+@@ -4277,63 +4310,65 @@ get_pixbuf_for_content (goffset file_len,
+     return pixbuf;
+ }
+ 
++/* Runs in a worker thread, so decoding a big image doesn't block the UI. */
++static void
++thumbnail_load_thread (GTask *task,
++                       gpointer source_object,
++                       gpointer task_data,
++                       GCancellable *cancellable)
++{
++    ThumbnailLoad *load;
++    GdkPixbuf *pixbuf;
++
++    load = task_data;
++    pixbuf = NULL;
++
++    if (load->original != NULL)
++    {
++        pixbuf = get_pixbuf_for_location (load->original, load->max_size, cancellable);
++    }
++
++    /* Fall back to the thumbnail if the original couldn't be loaded */
++    if (pixbuf == NULL && load->thumbnail != NULL &&
++            !g_cancellable_is_cancelled (cancellable))
++    {
++        pixbuf = get_pixbuf_for_location (load->thumbnail, load->max_size, cancellable);
++    }
++
++    g_task_return_pointer (task, pixbuf, g_object_unref);
++}
++
+ static void
+-thumbnail_read_callback (GObject *source_object,
++thumbnail_load_callback (GObject *source_object,
+                          GAsyncResult *res,
+                          gpointer user_data)
+ {
+     ThumbnailState *state;
+-    gsize file_size;
+-    char *file_contents;
+-    gboolean result;
+     CajaDirectory *directory;
+     GdkPixbuf *pixbuf;
+ 
+     state = user_data;
++    pixbuf = g_task_propagate_pointer (G_TASK (res), NULL);
+ 
+     if (state->directory == NULL)
+     {
+         /* Operation was cancelled. Bail out */
++        if (pixbuf)
++        {
++            g_object_unref (pixbuf);
++        }
+         thumbnail_state_free (state);
+         return;
+     }
+ 
+     directory = caja_directory_ref (state->directory);
+ 
+-    result = g_file_load_contents_finish (G_FILE (source_object),
+-                                          res,
+-                                          &file_contents, &file_size,
+-                                          NULL, NULL);
+-
+-    pixbuf = NULL;
+-    if (result)
+-    {
+-        pixbuf = get_pixbuf_for_content (file_size, file_contents);
+-        g_free (file_contents);
+-    }
+-
+-    if (pixbuf == NULL && state->trying_original)
+-    {
+-        GFile *location;
+-
+-        state->trying_original = FALSE;
++    state->directory->details->thumbnail_state = NULL;
++    async_job_end (state->directory, "thumbnail");
+ 
+-        location = g_file_new_for_path (state->file->details->thumbnail_path);
+-        g_file_load_contents_async (location,
+-                                    state->cancellable,
+-                                    thumbnail_read_callback,
+-                                    state);
+-        g_object_unref (location);
+-    }
+-    else
+-    {
+-        state->directory->details->thumbnail_state = NULL;
+-        async_job_end (state->directory, "thumbnail");
++    thumbnail_got_pixbuf (state->directory, state->file, pixbuf, state->tried_original);
+ 
+-        thumbnail_got_pixbuf (state->directory, state->file, pixbuf, state->tried_original);
+-
+-        thumbnail_state_free (state);
+-    }
++    thumbnail_state_free (state);
+ 
+     caja_directory_unref (directory);
+ }
+@@ -4343,8 +4378,9 @@ thumbnail_start (CajaDirectory *directory,
+                  CajaFile *file,
+                  gboolean *doing_io)
+ {
+-    GFile *location;
+     ThumbnailState *state;
++    ThumbnailLoad *load;
++    GTask *task;
+ 
+     if (directory->details->thumbnail_state != NULL)
+     {
+@@ -4370,24 +4406,25 @@ thumbnail_start (CajaDirectory *directory,
+     state->file = file;
+     state->cancellable = g_cancellable_new ();
+ 
++    load = g_new0 (ThumbnailLoad, 1);
++    /* cf. caja_file_get_icon() */
++    load->max_size = CAJA_ICON_SIZE_LARGEST * cached_thumbnail_size / CAJA_ICON_SIZE_STANDARD;
+     if (file->details->thumbnail_wants_original)
+     {
+         state->tried_original = TRUE;
+-        state->trying_original = TRUE;
+-        location = caja_file_get_location (file);
++        load->original = caja_file_get_location (file);
+     }
+-    else
++    if (file->details->thumbnail_path != NULL)
+     {
+-        location = g_file_new_for_path (file->details->thumbnail_path);
++        load->thumbnail = g_file_new_for_path (file->details->thumbnail_path);
+     }
+ 
+     directory->details->thumbnail_state = state;
+ 
+-    g_file_load_contents_async (location,
+-                                state->cancellable,
+-                                thumbnail_read_callback,
+-                                state);
+-    g_object_unref (location);
++    task = g_task_new (NULL, state->cancellable, thumbnail_load_callback, state);
++    g_task_set_task_data (task, load, (GDestroyNotify) thumbnail_load_free);
++    g_task_run_in_thread (task, thumbnail_load_thread);
++    g_object_unref (task);
+ }
+ 
+ static void
